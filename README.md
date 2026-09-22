@@ -1,237 +1,247 @@
 # strands-plan-tool
 
-Ever noticed that when your agent needs three tool calls in a row, you wait for the
-model three times? Not because the model is thinking — because it has to be *asked*
-again before it can make the next call.
+When your agent needs three tool calls in a row, you wait for the model three times — not
+because it is thinking, but because it has to be *asked* again before it can make the next
+call.
 
-This package lets the model hand over one plan instead.
+This adds one tool that lets the model hand over a whole plan instead. A dependency chain
+of depth D costs **one** model round trip instead of D.
 
 ```bash
-uv run demo.py
+uv add strands-plan-tool
 ```
 
-## What it does
+## 30 seconds
 
-The model writes a `WorkflowPlan`: which tools to call, what depends on what, and how
-each step's arguments derive from earlier results. JSONata expressions carry data from
-one step into the next. The plan runs locally in one batch, and only the steps the plan
-named in `returns` travel back to the model.
+```python
+from strands import Agent
+from strands_plan_tool.strands_adapter import WorkflowPlanPlugin
 
-A dependency chain of depth D costs **one** model round trip instead of D.
+agent = Agent(tools=[read_action_log, get_character, roll_check], plugins=[WorkflowPlanPlugin()])
+agent("Resolve this combat round.")
+```
+
+That registers one extra tool, `submit_workflow_plan`. Tool choice stays automatic: the
+model plans when it helps and ignores the tool when it does not.
+
+Two runnable examples, no credentials needed:
+
+```bash
+uv run python -m examples.game_master    # 12 steps, depth 6, three-wide fan-out
+uv run demo.py                           # 3 steps, straight chain
+```
+
+## Writing a plan
+
+A plan is steps, dependencies, and which results come back. Three fields carry all of it:
+
+| Field | What it does |
+|---|---|
+| `args` | Literal arguments, known before the plan runs |
+| `bind` | JSONata expressions evaluated against `{"steps": {<id>: <result>}}` |
+| `returns` | The only step ids whose results travel back to the model |
+
+Dependencies are **inferred from the bindings** — reading `steps.log.actions[0].actor` *is*
+the edge, so you never declare it twice. `after` exists for the rare edge a binding does
+not express.
 
 ```python
 from strands_plan_tool import PlanStep, WorkflowPlan, execute_plan
 
 plan = WorkflowPlan(
     steps=(
-        PlanStep(id="board", tool="read_notice_board"),
+        PlanStep(id="log", tool="read_action_log"),
+        PlanStep(id="hero", tool="get_character", bind={"name": "steps.log.actions[0].actor"}),
         PlanStep(
-            id="beast", tool="consult_bestiary", bind={"beast": "steps.board.contracts[0].beast"}
-        ),
-        PlanStep(
-            id="satchel",
-            tool="pack_satchel",
-            bind={"sign": "steps.beast.weakness", "oil": "steps.beast.oil"},
+            id="check",
+            tool="roll_check",
+            bind={
+                "actor": "steps.hero.name",
+                "skill": "steps.log.actions[0].skill",
+                "modifier": "steps.hero.skills.stealth",
+            },
         ),
     ),
-    returns=("satchel",),
+    returns=("check",),
     final=True,
 )
 
 result = await execute_plan(plan, my_tool_invoker)
 ```
 
-`board` and `beast` did the work and never entered the model's context.
+`log` and `hero` did the work and never entered the model's context. Note that `check` binds
+from *two* upstream steps — `hero` for the modifier and `log` for the skill name — so its
+in-degree is 2 and both edges were inferred from the bindings alone.
 
-## What it does not do
+## A real shape: one RPG combat round
 
-**It does not change the agentic loop.** The model emits exactly one tool call. From
-the event loop's side that is an ordinary single tool call: dispatch, get a result,
-call the model again. Everything the plan does happens inside that one call.
+`/examples/rpg.py` is a Game Master resolving a round for three players. It is the useful
+example because a round is not a straight line:
 
-**It does not make the agent static.** The *model* writes the plan, not you. Planning is
-one tool among many with tool choice left automatic, so the model elects to plan, per
-turn, or ignores it and calls tools one at a time. Contrast an author-defined DAG,
-which is fixed before the agent ever runs.
-
-**It does not remove judgement — it defers it.** Inside a plan the model does not
-re-deliberate between steps. That is the trade, and it is the same one you make writing
-a shell pipeline instead of running commands interactively. Plan when the dependencies
-are *mechanical*. Do not plan when each result needs a decision.
-
-## Where it pays off, and where it does not
-
-The win is **depth, not width**. Independent tool calls in one turn are already
-concurrent in most agent runtimes; a plan buys nothing there. It buys everything on the
-shape that is actually common — a lookup, then a fan-out over its results, which is
-depth-2 today because the model must see the ids before it can request them.
-
-A plan costs more output tokens to generate than a single tool call, so there is a
-break-even depth. Measure it on your own workload rather than assuming a win.
-
-## Safety
-
-JSONata is a query language, not a programming language: no imports, no filesystem, no
-network, no subprocess. Its one dynamic surface is `$eval`, which evaluates further
-JSONata (never Python), and this package shuts it by default so a plan's bindings can
-be read completely before anything executes.
-
-```python
-JsonataBinder()  # $eval raises PermissionError
-JsonataBinder(allow_eval=True)  # opt back in, and give up static inspectability
+```
+L0  read_action_log                        1 step
+L1  get_character   x3   (fan-out)         3 steps
+L2  roll_check      x3                     3 steps
+L3  resolve_action  x3                     3 steps
+L4  tally_round          (join, in-degree 3)
+L5  narrate_round
 ```
 
-A binding that fails is a **step failure**, never a substituted `None`. Handing a tool
-an argument the plan did not intend is worse than reporting that the plan was wrong.
+Twelve steps, depth 6, three wide. Run it:
 
-Cycles, duplicate ids, dangling references, and step-count overruns are all rejected
-before any tool runs, so a malformed plan costs one cheap repair round trip and leaves
-no side effects behind.
+```
+plan: 12 steps, depth 6, widest level 3
 
-## Architecture
+  L0 ok  log        read_action_log    0.0ms
+  L1 ok  c_vesna    get_character      0.3ms
+  L1 ok  c_alder    get_character      0.1ms
+  L1 ok  c_grimm    get_character      0.1ms
+  ...
+  L4 ok  tally      tally_round        0.1ms
+  L5 ok  narration  narrate_round      0.2ms
 
-The engine imports no agent framework. Tool invocation sits behind a `ToolInvoker`
-protocol:
+  levels (model round trips replaced): 6
+  returned to the model:       ['narration', 'tally']
+  results the model never saw: 10
 
-```python
-async def __call__(self, name: str, args: Mapping[str, JsonValue]) -> JsonValue: ...
+  Round resolved at the collapsed bridge at Kaer Trolde: 24 damage dealt. The troll still stands.
 ```
 
-That seam is why the latency claim holds — steps run in this process, with no hop back
-to the model provider between them — and it is where an agent-framework adapter attaches.
+Ten of the twelve results never reached the model. It asked for a resolved round and got a
+resolved round.
 
-The boundary models are Pydantic v2 and frozen, so a TypeScript port mirrors
-`models.py` as Zod schemas with the same field names.
+### The join is why it is JSONata and not a path syntax
+
+`tally_round` wants one *array* of damage values, but each value lives in a different
+step. A binding builds the array inline:
+
+```python
+PlanStep(
+    id="tally",
+    tool="tally_round",
+    args={"target": "bridge troll"},
+    bind={"damages": "[steps.a_vesna.damage, steps.a_alder.damage, steps.a_grimm.damage]"},
+)
+```
+
+No glue tool, no extra round trip. A plain path syntax cannot express that; an expression
+language can. `$sum`, `$count`, filters and predicates are all available the same way —
+which is also how you shrink a large tool result to the one number the model needs.
+
+### What the model actually does with it
+
+Running the same example against a live model (`--live`) is the interesting part. It does
+**not** blindly plan everything. Reproducibly, across runs:
+
+```
+tools the model called:  ['read_action_log', 'submit_workflow_plan']
+did it plan?             True
+model round trips:       2        (a plain loop needs ~7)
+```
+
+It calls `read_action_log` directly first — it cannot know how many characters to fetch
+until it has seen the actions — then plans the eleven mechanical steps that follow. Nobody
+prompted that split. **The model uses the loop where judgement is needed and the plan where
+it is not**, which is exactly the division the tool is for.
+
+Two practical notes from those runs:
+
+- The model tends to over-populate `returns`, handing back every step instead of the two
+  that matter. Saying "name in `returns` only the steps whose results you actually need"
+  in your system prompt tightens it.
+- Document your tools' **return shapes** in their docstrings. Tool schemas describe inputs
+  only, so a model binding to `steps.hero.sign` when the field is `weakness` is your
+  documentation's fault, not the model's.
+
+## When it pays off
+
+| Shape | Use a plan? |
+|---|---|
+| One tool call | No — the plan schema costs more tokens than it saves |
+| Two or more *mechanically* dependent calls | Yes — this is the whole point |
+| A lookup, then a fan-out over its results | Yes — the most common winning shape |
+| Independent calls in one turn | No — already concurrent in the agent loop |
+| Each result needs your judgement before the next | No — call them one at a time |
+
+Break-even is **depth 2**. Below that, do not plan.
 
 ## Measured on a live model
 
-Bedrock, `eu.anthropic.claude-sonnet-4-5-20250929-v1:0` in `eu-central-1`, 2026-09-17.
-Two arms, same model, same tools, same prompt: `loop` is an ordinary agent, `plan` is the
-same agent plus this plugin. Each tool sleeps 250ms, so the wall-clock gap is attributable
-to model round trips rather than tool speed. Medians of 2 trials.
+Bedrock, `eu.anthropic.claude-sonnet-4-5-20250929-v1:0` in `eu-central-1`, 2026-09-22. Same
+model, tools and prompt in both arms; each tool sleeps 250ms so the gap is attributable to
+round trips, not tool speed. Medians of 2 trials.
 
 ```
 depth |            loop            |            plan            | verdict
       |  wall   trips   tokens     |  wall   trips   tokens  pl%|
 ------+----------------------------+----------------------------+---------------
-  1   |  3.16s   2.0     1309    |  3.47s   2.0     3534   0| model declined
-  2   |  5.28s   3.0     2496    |  3.32s   1.0     1994 100| plan +37%
-  3   |  8.53s   4.0     3932    |  4.08s   1.0     2146 100| plan +52%
-  4   | 10.62s   5.0     5588    |  4.56s   1.0     2290 100| plan +57%
-  5   | 11.32s   6.0     7962    |  5.49s   1.0     2522 100| plan +51%
+  1   |  3.27s   2.0     1309    |  3.36s   2.0     3532   0| model declined
+  2   |  5.72s   3.0     2494    |  3.38s   1.0     1994 100| plan +41%
+  3   |  7.33s   4.0     3930    |  4.12s   1.0     2157 100| plan +44%
+  4   | 10.00s   5.0     5646    |  4.86s   1.0     2285 100| plan +51%
+  5   | 12.82s   6.0     8128    |  5.69s   1.0     2518 100| plan +56%
 ```
 
-Reproduce it with `AWS_PROFILE=... AWS_REGION=... uv run python -m bench.breakeven`.
+Round trips stay flat at 1 while the loop's grow with depth — by depth 5, about half the wall
+clock and under a third of the tokens. At depth 1 the model **declined to plan** (`pl% = 0`)
+unprompted. Reproduce with
+`AWS_PROFILE=... AWS_REGION=... uv run python -m bench.breakeven`.
 
-Three readings, and the second matters as much as the first:
-
-- **Round trips stay flat at 1 while the loop's grow with depth.** That is the mechanism and
-  the whole claim. Break-even is **depth 2**; by depth 5 a plan is about half the wall clock
-  and roughly a third of the tokens (2522 against 7962).
-- **At depth 1 the model declined to plan** (`pl% = 0`) and called the tool directly. Nobody
-  told it to. A one-call task is not worth a plan and it judged that correctly, which is what
-  "planning is elected, not imposed" looks like in a measurement.
-- **A plan is not free.** At depth 1, where the model does plan if pushed, the schema costs
-  more tokens than it saves (3534 against 1309). Below depth 2 planning is the wrong tool.
-
-## Using it with Strands Agents
+## Options
 
 ```python
-from strands import Agent
-from strands_plan_tool.strands_adapter import WorkflowPlanPlugin
-
-agent = Agent(
-    tools=[read_notice_board, consult_bestiary, pack_satchel],
-    plugins=[WorkflowPlanPlugin()],
+WorkflowPlanPlugin(
+    plannable=["*", "!delete_files"],  # which tools a plan may call
+    honor_final=True,  # a final plan ends the turn
+    max_steps=32,  # ceiling per plan
 )
 ```
 
-That registers one extra tool, `submit_workflow_plan`. Tool choice stays automatic, so the
-model may plan or may keep calling tools one at a time.
+**`plannable`** uses the same pattern syntax as `HumanInTheLoop.allowed_tools`.
+**Approval-gated tools cannot be planned** — a direct tool call refuses interrupts, so such a
+tool is rejected at validation and the model is told to call it directly. The gate keeps
+working; it just is not batchable. If your agent has interventions attached this argument is
+required, and construction fails loudly rather than silently batching something that should
+have prompted a human.
 
-### Approval-gated tools cannot be planned
+**`honor_final`** ends the turn on a plan that set `final`, instead of sampling the model
+again to restate results it already has. That removes the second round trip and most of the
+token cost. The trade is visible: the closing message becomes JSON rather than prose, so pass
+`False` to keep the prose. The exit only arms when every step succeeded.
 
-Verified against `strands-agents` 1.55.1 on 2026-09-15. A direct tool call — the path a
-plan uses — refuses interrupts at two points in `strands/tools/_caller.py`:
+## Safety
 
-- if the agent is already interrupted, any direct call raises
-  `RuntimeError("cannot directly call tool during interrupt")`;
-- if a tool raises an interrupt during a direct call, the caller raises
-  `RuntimeError("cannot raise interrupt in direct tool call")` — and first calls
-  `_InterruptState.deactivate()`, which **clears** the agent's interrupts and context.
+JSONata is a query language: no imports, no filesystem, no network, no subprocess. Its one
+dynamic surface is `$eval` — which evaluates further JSONata, never Python — and it is off by
+default, so a plan's bindings can be read completely before anything runs.
+`JsonataBinder(allow_eval=True)` opts back in and gives up that inspectability.
 
-That second behaviour is why plannability is decided *before* execution: by the time the
-error surfaces, the interrupt state is already gone, so catching it is too late. A tool that
-can request approval is refused at validation, and the model is told to call it directly.
-The gate keeps working; it just is not batchable.
+Cycles, duplicate ids, dangling references and step-count overruns are rejected **before**
+any tool runs, so a malformed plan costs one cheap repair round trip and leaves no side
+effects. A binding that fails is a step failure, never a substituted `None`.
 
-Because this package cannot tell from outside which tools an intervention gates, attaching
-to an agent that has interventions requires an explicit list, using the same pattern syntax
-as `HumanInTheLoop.allowed_tools`:
+## What it does not change
 
-```python
-WorkflowPlanPlugin(plannable=["*", "!delete_files"])
-```
+**Not the agent loop.** The model emits exactly one tool call; from the event loop's side
+that is an ordinary tool call — dispatch, one result, carry on.
 
-Leave it out on an agent with interventions and construction fails loudly rather than
-silently batching something that should have prompted a human.
-
-## Scheduling
-
-The plan is a **DAG**, not a tree — a step may have several dependencies and several
-dependents, so in-degree above one is normal and tree structures are the wrong shape.
-Ordering comes from Kahn's algorithm over in-degree counts. A DFS topological sort is the
-one choice to avoid: it produces a single linear sequence, and running a sequence serialises
-steps that never depended on each other.
-
-Levels are how a plan is *described* — the level count is its depth, and that is the number
-of model round trips it replaces. Levels are not how it is *run*: a level barrier makes
-every step in level N+1 wait for the slowest step in level N even when it never depended on
-it. Execution is therefore barrier-free, with each step awaiting exactly its own
-dependencies and starting the instant its last one lands.
-
-Cost is O(1) amortised per step and per edge, O(V + E) overall, which is optimal — a plan
-cannot be validated without being read. Wall clock is bound by the critical path rather
-than by the sum of per-level maxima.
+**Not the model's autonomy.** The *model* writes the plan, not you — unlike an
+author-defined DAG, fixed before the agent ever runs. What it gives up is re-deliberating
+between the steps it chose to batch: the trade you make writing a shell pipeline instead of
+running commands interactively.
 
 ## Development
+
+The engine imports no agent framework. Tool invocation sits behind a `ToolInvoker` protocol,
+which is why steps run in-process with no hop to the model provider between them, and where
+the Strands adapter attaches. Ordering is Kahn's algorithm over in-degree counts, and
+execution is barrier-free: each step starts the instant its own dependencies land.
 
 ```bash
 uv sync --extra dev
 uv run ruff check . && uv run ruff format --check .
-uv run mypy src tests demo.py
+uv run mypy src tests examples bench demo.py demo_bedrock.py
 uv run pytest -q
 ```
 
-### A final plan ends the turn
-
-A plan that sets `final` asserts its returned values answer the request. The plugin takes
-the model at its word and ends the turn there, rather than sampling once more purely to have
-the model restate the result. That is the difference between two round trips and one — and
-between 5310 tokens and 2522 at depth 5, because the restatement is what carried the cost.
-
-The trade is real and visible: the closing message becomes the plan's returned values as
-JSON rather than prose.
-
-```python
-WorkflowPlanPlugin(honor_final=False)  # keep the prose, pay the extra round trip
-```
-
-The early exit is only armed when every step succeeded. Ending a turn on a partial result
-would hide the failure from the model, which is the one thing the ledger exists to prevent.
-
-## Status
-
-The engine, its guards, the scheduler, and the Strands adapter are implemented and tested
-(68 tests), and the latency claim is measured against a live Bedrock model — see the table
-above. Two bugs the benchmark caught that the unit suite had not, both now covered by
-regression tests:
-
-- a `@tool` returning a dict arrives as a JSON *string* inside a content block, so the
-  obvious binding (`steps.board.beast`) could not resolve until `unwrap_tool_result` decoded
-  it — and a `status="error"` result was being passed through as if it were data;
-- the SDK hands a nested Pydantic tool parameter through as the raw decoded dict, so
-  `plan.steps` raised `AttributeError` against a live model while every test stayed green,
-  because the tests called `run_plan` with an already-typed `WorkflowPlan`. Reported upstream
-  as [harness-sdk#4383](https://github.com/strands-agents/harness-sdk/issues/4383);
-  `coerce_plan` handles it locally either way.
+MIT licensed.
