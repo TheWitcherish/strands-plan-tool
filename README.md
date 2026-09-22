@@ -4,168 +4,139 @@ When your agent needs three tool calls in a row, you wait for the model three ti
 because it is thinking, but because it has to be *asked* again before it can make the next
 call.
 
-This adds one tool that lets the model hand over a whole plan instead. A dependency chain
+This adds one tool that lets the model hand over the whole chain at once. A dependency chain
 of depth D costs **one** model round trip instead of D.
 
 ```bash
 uv add strands-plan-tool
 ```
 
-## 30 seconds
+## A complete example
+
+A game master resolving an attack: look up the monster, roll against its armour, apply the
+damage. Three tools, each needing the one before it.
+
+Needs AWS credentials and Bedrock model access — `export AWS_PROFILE=...` and
+`export AWS_REGION=...`. Pass `Agent(model=BedrockModel(model_id=...))` to pick a model
+explicitly; omitted here, so Strands uses its default.
 
 ```python
-from strands import Agent
+from strands import Agent, tool
+
 from strands_plan_tool.strands_adapter import WorkflowPlanPlugin
 
-agent = Agent(tools=[read_action_log, get_character, roll_check], plugins=[WorkflowPlanPlugin()])
-agent("Resolve this combat round.")
-```
+BESTIARY = {"goblin": {"name": "goblin", "hp": 7, "armour": 15}}
 
-That registers one extra tool, `submit_workflow_plan`. Tool choice stays automatic: the
-model plans when it helps and ignores the tool when it does not.
 
-Two runnable examples, no credentials needed:
+@tool
+def look_up_monster(name: str) -> dict[str, object]:
+    """Look up a monster's stat block.
 
-```bash
-uv run python -m examples.game_master    # 12 steps, depth 6, three-wide fan-out
-uv run demo.py                           # 3 steps, straight chain
-```
+    Args:
+        name: Monster name, e.g. "goblin".
 
-## Writing a plan
+    Returns:
+        An object shaped {"name": str, "hp": int, "armour": int}.
+    """
+    return dict(BESTIARY[name.lower()])
 
-A plan is steps, dependencies, and which results come back. Three fields carry all of it:
 
-| Field | What it does |
-|---|---|
-| `args` | Literal arguments, known before the plan runs |
-| `bind` | JSONata expressions evaluated against `{"steps": {<id>: <result>}}` |
-| `returns` | The only step ids whose results travel back to the model |
+@tool
+def roll_attack(armour: int) -> dict[str, object]:
+    """Roll an attack against an armour value.
 
-Dependencies are **inferred from the bindings** — reading `steps.log.actions[0].actor` *is*
-the edge, so you never declare it twice. `after` exists for the rare edge a binding does
-not express.
+    Args:
+        armour: The target's armour, from look_up_monster's "armour" field.
 
-```python
-from strands_plan_tool import PlanStep, WorkflowPlan, execute_plan
+    Returns:
+        An object shaped {"roll": int, "hits": bool, "damage": int}.
+    """
+    roll = 18
+    return {"roll": roll, "hits": roll >= armour, "damage": 6 if roll >= armour else 0}
 
-plan = WorkflowPlan(
-    steps=(
-        PlanStep(id="log", tool="read_action_log"),
-        PlanStep(id="hero", tool="get_character", bind={"name": "steps.log.actions[0].actor"}),
-        PlanStep(
-            id="check",
-            tool="roll_check",
-            bind={
-                "actor": "steps.hero.name",
-                "skill": "steps.log.actions[0].skill",
-                "modifier": "steps.hero.skills.stealth",
-            },
-        ),
+
+@tool
+def apply_damage(monster: str, damage: int) -> dict[str, object]:
+    """Apply damage to a monster.
+
+    Args:
+        monster: Monster name, from look_up_monster's "name" field.
+        damage: Damage dealt, from roll_attack's "damage" field.
+
+    Returns:
+        An object shaped {"hp_after": int, "defeated": bool}.
+    """
+    hp_after = max(BESTIARY[monster.lower()]["hp"] - damage, 0)
+    return {"hp_after": hp_after, "defeated": hp_after == 0}
+
+
+agent = Agent(
+    system_prompt=(
+        "You are a game master for a Dungeons & Dragons game.\n\n"
+        "You have a submit_workflow_plan tool. When you already know which tools to call "
+        "and each call's arguments come from an earlier call's result, submit one plan "
+        "instead of calling the tools one at a time. Each step's `bind` maps an argument "
+        'to a JSONata expression over {"steps": {<id>: <result>}}, for example '
+        '{"armour": "steps.monster.armour"}. Read each tool\'s documented return shape.'
     ),
-    returns=("check",),
-    final=True,
+    tools=[look_up_monster, roll_attack, apply_damage],
+    plugins=[WorkflowPlanPlugin()],
 )
 
-result = await execute_plan(plan, my_tool_invoker)
+response = agent("The rogue attacks the goblin. Resolve the attack and tell me the outcome.")
+
+print(response.message["content"][0]["text"])
+print(f"model round trips: {response.metrics.cycle_count}  (a plain loop needs 4)")
 ```
 
-`log` and `hero` did the work and never entered the model's context. Note that `check` binds
-from *two* upstream steps — `hero` for the modifier and `log` for the skill name — so its
-in-degree is 2 and both edges were inferred from the bindings alone.
-
-## A real shape: one RPG combat round
-
-`/examples/rpg.py` is a Game Master resolving a round for three players. It is the useful
-example because a round is not a straight line:
-
 ```
-L0  read_action_log                        1 step
-L1  get_character   x3   (fan-out)         3 steps
-L2  roll_check      x3                     3 steps
-L3  resolve_action  x3                     3 steps
-L4  tally_round          (join, in-degree 3)
-L5  narrate_round
+Tool #1: submit_workflow_plan
+
+{"lookup": {"name": "goblin", "hp": 7, "armour": 15},
+ "attack": {"roll": 18, "hits": true, "damage": 6},
+ "damage": {"hp_after": 1, "defeated": false}}
+model round trips: 1  (a plain loop needs 4)
 ```
 
-Twelve steps, depth 6, three wide. Run it:
+One tool call. Three tools ran. You wrote no plan — the model did.
 
-```
-plan: 12 steps, depth 6, widest level 3
+The integration is the two lines you already saw: import `WorkflowPlanPlugin`, pass it in
+`plugins=`. Tool choice stays automatic, so the model plans when it helps and ignores the
+tool when it does not.
 
-  L0 ok  log        read_action_log    0.0ms
-  L1 ok  c_vesna    get_character      0.3ms
-  L1 ok  c_alder    get_character      0.1ms
-  L1 ok  c_grimm    get_character      0.1ms
-  ...
-  L4 ok  tally      tally_round        0.1ms
-  L5 ok  narration  narrate_round      0.2ms
+## Three things to know
 
-  levels (model round trips replaced): 6
-  returned to the model:       ['narration', 'tally']
-  results the model never saw: 10
+**1. Document your tools' return shapes.** Tool schemas describe *inputs* only. A model
+binding to `steps.lookup.ac` when your field is `armour` is your docstring's fault, not the
+model's — so every tool above ends with a `Returns:` line naming the exact shape. This is the
+single biggest factor in whether plans work for you.
 
-  Round resolved at the collapsed bridge at Kaer Trolde: 24 damage dealt. The troll still stands.
-```
+**2. Tell the model when to plan.** One paragraph in the system prompt, as above. Without it
+the model usually keeps calling tools one at a time — not wrong, just slower.
 
-Ten of the twelve results never reached the model. It asked for a resolved round and got a
-resolved round.
+**3. A `final` plan ends the turn, so the answer is JSON.** The model marked its plan final,
+meaning its results *are* the answer, so the turn ended there instead of sampling the model
+again to restate them. That is the round trip you saved. It also means the final message is
+appended rather than streamed, which is why the example prints it explicitly. Want prose?
+`WorkflowPlanPlugin(honor_final=False)` — one more round trip, nicer output.
 
-### The join is why it is JSONata and not a path syntax
+Also expect the JSON keys to vary: `lookup` and `attack` are step ids the *model* chose. Three
+runs of this exact example produced `lookup`, `monster` and `goblin_stats` for the first step.
+The values are stable; the names are its own.
 
-`tally_round` wants one *array* of damage values, but each value lives in a different
-step. A binding builds the array inline:
+## When not to bother
 
-```python
-PlanStep(
-    id="tally",
-    tool="tally_round",
-    args={"target": "bridge troll"},
-    bind={"damages": "[steps.a_vesna.damage, steps.a_alder.damage, steps.a_grimm.damage]"},
-)
-```
-
-No glue tool, no extra round trip. A plain path syntax cannot express that; an expression
-language can. `$sum`, `$count`, filters and predicates are all available the same way —
-which is also how you shrink a large tool result to the one number the model needs.
-
-### What the model actually does with it
-
-Running the same example against a live model (`--live`) is the interesting part. It does
-**not** blindly plan everything. Reproducibly, across runs:
-
-```
-tools the model called:  ['read_action_log', 'submit_workflow_plan']
-did it plan?             True
-model round trips:       2        (a plain loop needs ~7)
-```
-
-It calls `read_action_log` directly first — it cannot know how many characters to fetch
-until it has seen the actions — then plans the eleven mechanical steps that follow. Nobody
-prompted that split. **The model uses the loop where judgement is needed and the plan where
-it is not**, which is exactly the division the tool is for.
-
-Two practical notes from those runs:
-
-- The model tends to over-populate `returns`, handing back every step instead of the two
-  that matter. Saying "name in `returns` only the steps whose results you actually need"
-  in your system prompt tightens it.
-- Document your tools' **return shapes** in their docstrings. Tool schemas describe inputs
-  only, so a model binding to `steps.hero.sign` when the field is `weakness` is your
-  documentation's fault, not the model's.
-
-## When it pays off
-
-| Shape | Use a plan? |
+| Shape | Plan? |
 |---|---|
 | One tool call | No — the plan schema costs more tokens than it saves |
-| Two or more *mechanically* dependent calls | Yes — this is the whole point |
+| Two or more *mechanically* dependent calls | Yes — this is the point |
 | A lookup, then a fan-out over its results | Yes — the most common winning shape |
 | Independent calls in one turn | No — already concurrent in the agent loop |
 | Each result needs your judgement before the next | No — call them one at a time |
 
-Break-even is **depth 2**. Below that, do not plan.
+Break-even is depth 2.
 
-## Measured on a live model
+## Measured
 
 Bedrock, `eu.anthropic.claude-sonnet-4-5-20250929-v1:0` in `eu-central-1`, 2026-09-22. Same
 model, tools and prompt in both arms; each tool sleeps 250ms so the gap is attributable to
@@ -183,59 +154,65 @@ depth |            loop            |            plan            | verdict
 ```
 
 Round trips stay flat at 1 while the loop's grow with depth — by depth 5, about half the wall
-clock and under a third of the tokens. At depth 1 the model **declined to plan** (`pl% = 0`)
-unprompted. Reproduce with
+clock and under a third of the tokens. At depth 1 the model **declined to plan** unprompted
+(`pl% = 0`), which is the correct call. Reproduce with
 `AWS_PROFILE=... AWS_REGION=... uv run python -m bench.breakeven`.
-
-## Options
-
-```python
-WorkflowPlanPlugin(
-    plannable=["*", "!delete_files"],  # which tools a plan may call
-    honor_final=True,  # a final plan ends the turn
-    max_steps=32,  # ceiling per plan
-)
-```
-
-**`plannable`** uses the same pattern syntax as `HumanInTheLoop.allowed_tools`.
-**Approval-gated tools cannot be planned** — a direct tool call refuses interrupts, so such a
-tool is rejected at validation and the model is told to call it directly. The gate keeps
-working; it just is not batchable. If your agent has interventions attached this argument is
-required, and construction fails loudly rather than silently batching something that should
-have prompted a human.
-
-**`honor_final`** ends the turn on a plan that set `final`, instead of sampling the model
-again to restate results it already has. That removes the second round trip and most of the
-token cost. The trade is visible: the closing message becomes JSON rather than prose, so pass
-`False` to keep the prose. The exit only arms when every step succeeded.
 
 ## Safety
 
 JSONata is a query language: no imports, no filesystem, no network, no subprocess. Its one
 dynamic surface is `$eval` — which evaluates further JSONata, never Python — and it is off by
 default, so a plan's bindings can be read completely before anything runs.
-`JsonataBinder(allow_eval=True)` opts back in and gives up that inspectability.
 
-Cycles, duplicate ids, dangling references and step-count overruns are rejected **before**
-any tool runs, so a malformed plan costs one cheap repair round trip and leaves no side
-effects. A binding that fails is a step failure, never a substituted `None`.
+Cycles, duplicate ids, dangling references and step-count overruns are rejected **before** any
+tool runs, so a bad plan costs one cheap repair round trip and leaves no side effects. A
+binding that fails is a step failure, never a silently substituted `None`.
 
-## What it does not change
+**Approval-gated tools cannot be planned.** A direct tool call refuses interrupts, so such a
+tool is rejected at validation and the model is told to call it directly — the gate keeps
+working, it just is not batchable. If your agent has interventions attached, name what is safe
+to batch: `WorkflowPlanPlugin(plannable=["*", "!delete_files"])`. Leave it out and
+construction fails loudly rather than silently skipping a human approval.
 
-**Not the agent loop.** The model emits exactly one tool call; from the event loop's side
-that is an ordinary tool call — dispatch, one result, carry on.
+## Going further
 
-**Not the model's autonomy.** The *model* writes the plan, not you — unlike an
-author-defined DAG, fixed before the agent ever runs. What it gives up is re-deliberating
-between the steps it chose to batch: the trade you make writing a shell pipeline instead of
-running commands interactively.
+A bigger shape — one RPG combat round for three players, in `examples/rpg.py`:
+
+```
+L0  read_action_log                      1 step
+L1  get_character   x3   (fan-out)       3 steps
+L2  roll_check      x3                   3 steps
+L3  resolve_action  x3                   3 steps
+L4  tally_round          (join, in-degree 3)
+L5  narrate_round
+```
+
+```bash
+uv run python -m examples.game_master          # offline, deterministic
+uv run python -m examples.game_master --live   # the model writes its own plan
+```
+
+Twelve steps, depth 6, three wide, and ten of the twelve results never reach the model. The
+join is where JSONata beats a path syntax: `tally_round` wants one *array* of damages living in
+three different steps, so a binding builds it inline —
+`{"damages": "[steps.a.damage, steps.b.damage, steps.c.damage]"}`. No glue tool, no extra
+round trip.
+
+Run it `--live` and the model does something worth seeing: it calls `read_action_log`
+directly first, because it cannot know how many characters to fetch until it has seen the
+actions, then plans the eleven mechanical steps that follow. It uses the loop where judgement
+is needed and the plan where it is not.
+
+You can also drive the engine without an agent at all — `execute_plan(plan, invoker)` takes
+any async `(name, args) -> result` callable, which is how the tests and the offline example
+run with no model and no credentials.
 
 ## Development
 
-The engine imports no agent framework. Tool invocation sits behind a `ToolInvoker` protocol,
-which is why steps run in-process with no hop to the model provider between them, and where
-the Strands adapter attaches. Ordering is Kahn's algorithm over in-degree counts, and
-execution is barrier-free: each step starts the instant its own dependencies land.
+Tool invocation sits behind a `ToolInvoker` protocol, so the engine imports no agent
+framework — steps run in-process with no hop to the model provider between them. Ordering is
+Kahn's algorithm over in-degree counts and execution is barrier-free: each step starts the
+instant its own dependencies land, so wall clock tracks the critical path.
 
 ```bash
 uv sync --extra dev
