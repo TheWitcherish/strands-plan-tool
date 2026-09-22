@@ -26,7 +26,7 @@ from strands.models import BedrockModel
 from bench.scenario import build_scenario
 from strands_plan_tool.strands_adapter import WorkflowPlanPlugin
 
-# Verified ACTIVE in account REDACTED / eu-central-1 on 2026-09-17 via
+# Verified ACTIVE in eu-central-1 on 2026-09-17 via
 # `aws bedrock list-inference-profiles`. Model ids are perishable -- re-verify, or pass --model.
 DEFAULT_MODEL: Final = "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
 TOOL_LATENCY_S: Final = 0.25

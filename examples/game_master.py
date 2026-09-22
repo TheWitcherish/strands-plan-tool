@@ -27,7 +27,7 @@ from examples.rpg import (
 )
 from strands_plan_tool import JsonValue, StepStatus, execute_plan, levels_of, summarize
 
-# Verified ACTIVE in account REDACTED / eu-central-1 on 2026-09-22 via
+# Verified ACTIVE in eu-central-1 on 2026-09-22 via
 # `aws bedrock list-inference-profiles`. Model ids are perishable -- re-verify, or --model.
 DEFAULT_MODEL: Final = "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
 
