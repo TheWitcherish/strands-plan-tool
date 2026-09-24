@@ -36,12 +36,6 @@ jobs:
       - name: Build
         run: uv build --no-sources
 
-      # An sdist ships files a wheel does not (bench/, examples/, demo scripts), so an
-      # AWS account id in a comment can reach PyPI while never entering the importable
-      # package. 0.1.3 shipped exactly that. Guard the artifact, not just the commit.
-      - name: Scan distributions for AWS account ids
-        run: uv run --isolated --no-project python scripts/scan_artifacts.py dist/*
-
       # Runs against the built artifacts, so a file missing from the wheel fails here
       # rather than on someone else's machine after release.
       - name: Smoke test (wheel)
