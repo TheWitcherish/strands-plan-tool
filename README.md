@@ -13,7 +13,7 @@ uv add strands-plan-tool
 
 ## A complete example
 
-A game master resolving an attack: look up the monster, roll against its armour, apply the
+A Game Master resolving an attack: look up the monster, roll against its armour, apply the
 damage. Three tools, each needing the one before it.
 
 Needs AWS credentials and Bedrock model access — `export AWS_PROFILE=...` and
@@ -72,7 +72,7 @@ def apply_damage(monster: str, damage: int) -> dict[str, object]:
 
 agent = Agent(
     system_prompt=(
-        "You are a game master for a Dungeons & Dragons game.\n\n"
+        "You are a Game Master for a tabletop role-playing game.\n\n"
         "You have a submit_workflow_plan tool. When you already know which tools to call "
         "and each call's arguments come from an earlier call's result, submit one plan "
         "instead of calling the tools one at a time. Each step's `bind` maps an argument "
