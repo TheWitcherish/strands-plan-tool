@@ -1,6 +1,6 @@
 [project]
 name = "strands-plan-tool"
-version = "0.3.0"
+version = "0.3.1"
 description = "One tool that lets a Strands agent batch a dependent tool chain into a single model round trip"
 readme = "README.md"
 requires-python = ">=3.12"
