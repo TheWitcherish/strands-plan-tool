@@ -1,10 +1,25 @@
+# Python
 __pycache__/
 *.py[cod]
 .venv/
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
+.coverage
+htmlcov/
+
+# Packaging
 dist/
 build/
 *.egg-info/
 uv.lock
+
+# Secrets and local environment
+.env
+.env.*
+
+# Editor, OS and local agent config
+.kiro/
+.vscode/
+.idea/
+.DS_Store
