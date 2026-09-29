@@ -2,8 +2,8 @@
 
 The model writes one :class:`WorkflowPlan` describing which tools to call, in what
 order, and how each step's arguments derive from earlier results. The plan executes
-locally in one batch and the model sees only the aggregated result, so a dependency
-chain of depth D costs one model round trip instead of D.
+locally in one batch and the model sees only the aggregated result, so no model call
+happens between dependent steps; a plain loop needs D + 1 for a chain of depth D.
 """
 
 from .binder import Binder, JsonataBinder

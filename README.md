@@ -1,11 +1,13 @@
 # strands-plan-tool
 
+![A plain agent loop needs D + 1 model calls for a chain of depth D; with one declarative plan, no model call happens between dependent steps. At depth 5: 18.94 s for the loop, 5.93 s for the plan.](https://raw.githubusercontent.com/TheWitcherish/strands-plan-tool/main/docs/hero.png)
+
 When your agent needs three tool calls in a row, you wait for the model three times — not
 because it is thinking, but because it has to be *asked* again before it can make the next
 call.
 
-This adds one tool that lets the model hand over the whole chain at once. A dependency chain
-of depth D costs **one** model round trip instead of D.
+This adds one tool that lets the model hand over the whole chain at once. A plain loop calls
+the model D + 1 times for a chain of depth D; with a plan, no model call happens between steps.
 
 ```bash
 uv add strands-plan-tool
@@ -21,11 +23,20 @@ Needs AWS credentials and Bedrock model access — `export AWS_PROFILE=...` and
 explicitly; omitted here, so Strands uses its default.
 
 ```python
+from typing import TypedDict
+
 from strands import Agent, tool
 
 from strands_plan_tool.strands_adapter import WorkflowPlanPlugin
 
-BESTIARY = {"goblin": {"name": "goblin", "hp": 7, "armour": 15}}
+
+class Monster(TypedDict):
+    name: str
+    hp: int
+    armour: int
+
+
+BESTIARY: dict[str, Monster] = {"goblin": {"name": "goblin", "hp": 7, "armour": 15}}
 
 
 @tool
@@ -83,7 +94,7 @@ agent = Agent(
     plugins=[WorkflowPlanPlugin()],
 )
 
-response = agent("The rogue attacks the goblin. Resolve the attack and tell me the outcome.")
+response = agent("The mage attacks the goblin. Resolve the attack and tell me the outcome.")
 
 print(response.message["content"][0]["text"])
 print(f"model round trips: {response.metrics.cycle_count}  (a plain loop needs 4)")
@@ -138,25 +149,27 @@ Break-even is depth 2.
 
 ## Measured
 
-Bedrock, `eu.anthropic.claude-sonnet-4-5-20250929-v1:0` in `eu-central-1`, 2026-09-22. Same
-model, tools and prompt in both arms; each tool sleeps 250ms so the gap is attributable to
-round trips, not tool speed. Medians of 2 trials.
+Bedrock, `global.anthropic.claude-sonnet-4-6` in `eu-central-1`, 2026-09-29. Same model,
+tools and prompt in both arms; each tool sleeps 250ms so the gap is attributable to round
+trips, not tool speed. Medians of 5 trials.
 
 ```
 depth |            loop            |            plan            | verdict
       |  wall   trips   tokens     |  wall   trips   tokens  pl%|
 ------+----------------------------+----------------------------+---------------
-  1   |  3.27s   2.0     1309    |  3.36s   2.0     3532   0| model declined
-  2   |  5.72s   3.0     2494    |  3.38s   1.0     1994 100| plan +41%
-  3   |  7.33s   4.0     3930    |  4.12s   1.0     2157 100| plan +44%
-  4   | 10.00s   5.0     5646    |  4.86s   1.0     2285 100| plan +51%
-  5   | 12.82s   6.0     8128    |  5.69s   1.0     2518 100| plan +56%
+  1   |  3.79s   2.0     1358    |  3.35s   1.0     1819 100| plan +11%
+  2   |  6.83s   3.0     2595    |  2.56s   1.0     1983 100| plan +63%
+  3   |  9.43s   4.0     3983    |  3.21s   1.0     2133 100| plan +66%
+  4   |  9.22s   5.0     5687    |  4.05s   1.0     2296 100| plan +56%
+  5   | 18.94s   6.0     8269    |  5.93s   2.0     4752 100| plan +69%
 ```
 
-Round trips stay flat at 1 while the loop's grow with depth — by depth 5, about half the wall
-clock and under a third of the tokens. At depth 1 the model **declined to plan** unprompted
-(`pl% = 0`), which is the correct call. Reproduce with
-`AWS_PROFILE=... AWS_REGION=... uv run python -m bench.breakeven`.
+The loop's round trips grow with depth; the plan's stay at 1 through depth 4. At depth 5 the
+model often reads the first result itself, then hands over the rest as one plan — 2 round
+trips, still under a third of the wall clock. At depth 1 the model planned every time; the
+plan schema costs more tokens than it saves there, and the wall-clock gain is within noise.
+Reproduce with
+`AWS_PROFILE=... AWS_REGION=... uv run python -m bench.breakeven --model global.anthropic.claude-sonnet-4-6 --trials 5`.
 
 ## Safety
 
