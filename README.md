@@ -171,9 +171,37 @@ took 1 round trip in 2.3 to 3.0 s; the same chain with the LLM making the triage
 146 to 245 ms per warm call). Keep the confidence in the return shape: it is what you branch
 on to hand a borderline ticket to a person.
 
-Every step in a plan runs, so a decision can choose an *argument* value
-(`"steps.triage.confidence > 0.8 ? \"auto\" : \"human\""`) but cannot skip a step. If the next
-step depends on the answer, call it directly.
+To act on the answer, give a step a `when`: a JSONata condition that must evaluate to `true`
+or `false`. A false `when` marks the step `not_taken` and prunes everything downstream of it,
+so two steps with opposite conditions form a branch decided inside the plan:
+
+```json
+{"steps": [
+  {"id": "ticket",   "tool": "read_ticket",       "args": {"ticket_id": 7}},
+  {"id": "triage",   "tool": "triage_ticket",     "bind": {"text": "steps.ticket.text"}},
+  {"id": "refund",   "tool": "refund_payment",    "bind": {"ticket_id": "steps.ticket.id"},
+   "when": "steps.triage.desk = \"treasury\" and steps.triage.confidence >= 0.8"},
+  {"id": "escalate", "tool": "escalate_to_human", "bind": {"ticket_id": "steps.ticket.id"},
+   "when": "$not(steps.triage.desk = \"treasury\" and steps.triage.confidence >= 0.8)"}
+ ], "returns": ["refund", "escalate"], "final": true}
+```
+
+The ticket scores 0.54 for treasury, so `escalate` runs and `refund` is `not_taken`, with no
+model call in between. On Claude Sonnet 4.6 with the real decider, the model wrote this shape
+in 21 runs out of 21: 1 round trip each time, exactly one side effect, the right branch at both
+thresholds tried (0.5 refunds, 0.8 escalates). Without `when`, one run in six planned the
+refund *and* the escalation unconditionally, and both ran. A `final` plan with a branch not
+taken still ends the turn.
+
+Three JSONata details that bite in conditions:
+
+- There is no `not` or `!` operator. Negate with `$not(...)`, or write the opposite comparison.
+- Equality is `=`, not `==`. `!=`, `and`, `or` and `in` work as you would expect.
+- A misspelled field matches nothing, and `$not` of nothing is still nothing. The step fails
+  with "matched no value" instead of guessing, so neither side of a branch runs.
+
+A step that binds to *both* sides of a branch is always `not_taken`, because one of its inputs
+never arrives. Join after a branch with a direct call for now.
 
 ## Measured
 
