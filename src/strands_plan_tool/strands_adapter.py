@@ -104,15 +104,16 @@ def resolve_plannable(patterns: Iterable[str], registered: Iterable[str]) -> fro
 
 
 def _plan_fully_succeeded(result: PlanResult) -> bool:
-    """Return whether every step in a plan completed successfully.
+    """Return whether every step in a plan completed or was a branch deliberately not taken.
 
     Args:
         result: A completed plan result.
 
     Returns:
-        True when no step failed or was skipped.
+        True when no step failed or was skipped. ``not_taken`` steps count as success: the
+        plan chose that branch, so a ``final`` plan may still end the turn.
     """
-    return all(outcome.status is StepStatus.OK for outcome in result.ledger)
+    return all(outcome.status in (StepStatus.OK, StepStatus.NOT_TAKEN) for outcome in result.ledger)
 
 
 def coerce_plan(plan: WorkflowPlan | Mapping[str, JsonValue]) -> WorkflowPlan:
@@ -354,6 +355,12 @@ class WorkflowPlanPlugin(Plugin):
         and bind to the exact field you need; `steps.board` alone is the whole result
         object, not a field of it. Name in `returns` only the steps whose results you
         actually need back. Set `final` when those results answer the request.
+
+        A step may set `when` to a JSONata expression that evaluates to true or false, for
+        example `"steps.triage.urgent"`. When it is false the step does not run, nor does
+        anything that depends on it, so two steps with opposite `when` conditions form a
+        branch decided inside the plan. JSONata has no `not` or `!` operator: negate with
+        `$not(...)`, or write the opposite comparison. Equality is `=`, not `==`.
 
         Do not use this when a step's outcome needs your judgement before you can decide
         what to call next; call those tools one at a time instead. If a tool's return

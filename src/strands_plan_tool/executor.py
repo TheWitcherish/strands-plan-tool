@@ -135,9 +135,13 @@ async def execute_plan(
         for dependency in dependencies:
             await tasks[dependency]
 
-        unusable = any(outcomes[d].status is not StepStatus.OK for d in dependencies)
-        if halted.is_set() or unusable:
+        statuses = {outcomes[d].status for d in dependencies}
+        if halted.is_set() or StepStatus.FAILED in statuses or StepStatus.SKIPPED in statuses:
             outcomes[step.id] = skipped(step)
+            return
+        if StepStatus.NOT_TAKEN in statuses:
+            # A branch that was not taken prunes everything downstream of it.
+            outcomes[step.id] = _not_taken(step, depth_of[step.id], 0.0)
             return
 
         outcome, value = await _run_step(step, depth_of[step.id], invoker, resolver, env)
@@ -145,6 +149,8 @@ async def execute_plan(
 
         if outcome.status is StepStatus.OK:
             results[step.id] = value
+            return
+        if outcome.status is StepStatus.NOT_TAKEN:
             return
 
         match plan.on_error:
@@ -213,6 +219,23 @@ async def _run_step(
             None,
         )
 
+    if step.when is not None:
+        try:
+            taken = binder.bind(step.when, env)
+        except Exception as exc:  # noqa: BLE001 - a bad condition is a step failure
+            return failure(f"`when` {step.when!r} failed to evaluate: {type(exc).__name__}: {exc}")
+        # JSONata yields nothing for a path that matches no field, so name the likely typo.
+        if taken is None:
+            return failure(
+                f"`when` {step.when!r} matched no value; check the field name against the "
+                "tool's documented return shape"
+            )
+        # No truthiness: a condition that yields a number or a string is a plan bug.
+        if not isinstance(taken, bool):
+            return failure(f"`when` {step.when!r} must be true or false, got {taken!r}")
+        if not taken:
+            return _not_taken(step, depth, elapsed()), None
+
     try:
         args = _resolve_args(step, binder, env)
     except BindEvaluationError as exc:
@@ -232,6 +255,17 @@ async def _run_step(
             duration_ms=elapsed(),
         ),
         value,
+    )
+
+
+def _not_taken(step: PlanStep, depth: int, duration_ms: float) -> StepOutcome:
+    """Record a step whose branch the plan chose not to take."""
+    return StepOutcome(
+        id=step.id,
+        tool=step.tool,
+        status=StepStatus.NOT_TAKEN,
+        level=depth,
+        duration_ms=duration_ms,
     )
 
 
@@ -282,6 +316,8 @@ def summarize(result: PlanResult) -> str:
                 mark = "FAILED "
             case StepStatus.SKIPPED:
                 mark = "skipped"
+            case StepStatus.NOT_TAKEN:
+                mark = "untaken"
             case _ as unreachable:
                 assert_never(unreachable)
         detail = f"  {outcome.error}" if outcome.error else ""

@@ -156,3 +156,68 @@ async def test_final_flag_is_carried_through() -> None:
     result = await execute_plan(plan, invoker)
     assert result.final is True
     assert result.inference_passes_saved == 0
+
+
+def _branching_plan() -> WorkflowPlan:
+    """triage decides; exactly one of front/back should run; notify follows front only."""
+    return WorkflowPlan.model_validate(
+        {
+            "steps": [
+                {"id": "triage", "tool": "triage"},
+                {"id": "front", "tool": "front", "when": "steps.triage.urgent"},
+                {"id": "back", "tool": "back", "when": "$not(steps.triage.urgent)"},
+                {"id": "notify", "tool": "notify", "bind": {"q": "steps.front.queue"}},
+            ],
+            "returns": ["front", "back", "notify"],
+            "final": True,
+        }
+    )
+
+
+async def test_when_picks_one_branch_and_prunes_the_other() -> None:
+    invoker = RecordingInvoker(
+        {"triage": {"urgent": False}, "front": {"queue": "front"}, "back": {"queue": "back"}}
+    )
+    result = await execute_plan(_branching_plan(), invoker)
+
+    status = {outcome.id: outcome.status for outcome in result.ledger}
+    assert status == {
+        "triage": StepStatus.OK,
+        "back": StepStatus.OK,
+        "front": StepStatus.NOT_TAKEN,
+        "notify": StepStatus.NOT_TAKEN,
+    }
+    assert [name for name, _ in invoker.calls] == ["triage", "back"]
+    assert result.returned == {"back": {"queue": "back"}}
+
+
+async def test_when_true_runs_the_branch_and_its_dependents() -> None:
+    invoker = RecordingInvoker({"triage": {"urgent": True}, "front": {"queue": "front"}})
+    await execute_plan(_branching_plan(), invoker)
+
+    assert sorted(name for name, _ in invoker.calls) == ["front", "notify", "triage"]
+    assert invoker.calls[-1] == ("notify", {"q": "front"})
+
+
+async def test_when_must_be_a_boolean_not_a_truthy_value() -> None:
+    invoker = RecordingInvoker({"triage": {"urgent": "yes"}})
+    result = await execute_plan(_branching_plan(), invoker)
+
+    front = next(outcome for outcome in result.ledger if outcome.id == "front")
+    assert front.status is StepStatus.FAILED
+    assert front.error is not None
+    assert "must be true or false" in front.error
+
+
+async def test_when_on_a_misspelled_field_fails_both_branches_and_names_the_cause() -> None:
+    # JSONata yields nothing for a missing field, and $not(nothing) is nothing too, so
+    # neither side of the branch may run. fail_fast may skip the sibling instead.
+    invoker = RecordingInvoker({"triage": {"urgnet": True}})
+    result = await execute_plan(_branching_plan(), invoker)
+
+    branches = [o for o in result.ledger if o.id in ("front", "back")]
+    assert all(o.status in (StepStatus.FAILED, StepStatus.SKIPPED) for o in branches)
+    errors = [o.error for o in branches if o.status is StepStatus.FAILED]
+    assert errors
+    assert all(e is not None and "matched no value" in e for e in errors)
+    assert [name for name, _ in invoker.calls] == ["triage"]

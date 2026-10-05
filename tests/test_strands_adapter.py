@@ -434,3 +434,30 @@ async def test_a_real_dependency_chain_runs_through_the_agent() -> None:
     assert result.levels == 2
     assert result.inference_passes_saved == 1
     assert result.final is True
+
+
+async def test_a_final_plan_with_a_branch_not_taken_still_ends_the_turn() -> None:
+    # Raw dict, the way a live model submits it. The `consult` branch is not taken, which
+    # is the plan's own choice, so it must not block the `final` early exit.
+    plugin = WorkflowPlanPlugin()
+    build_agent(plugins=[plugin])
+
+    result = await plugin.run_plan(
+        {
+            "steps": [
+                {"id": "board", "tool": "read_board"},
+                {
+                    "id": "beast",
+                    "tool": "consult",
+                    "when": 'steps.board.beast = "griffin"',
+                    "bind": {"beast": "steps.board.beast"},
+                },
+            ],
+            "returns": ["board", "beast"],
+            "final": True,
+        }
+    )
+
+    ledger = {o.id: o.status for o in result.ledger}
+    assert ledger == {"board": StepStatus.OK, "beast": StepStatus.NOT_TAKEN}
+    assert plugin._pending_final == '{"board": {"beast": "leshen"}}'

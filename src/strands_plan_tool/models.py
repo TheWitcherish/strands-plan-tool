@@ -51,6 +51,9 @@ class StepStatus(StrEnum):
     OK = "ok"
     FAILED = "failed"
     SKIPPED = "skipped"
+    NOT_TAKEN = "not_taken"
+    """The step's ``when`` was false, or it sits downstream of a step whose ``when`` was.
+    A branch the plan chose not to take, not a failure."""
 
 
 class PlanStep(BaseModel):
@@ -59,6 +62,10 @@ class PlanStep(BaseModel):
     ``args`` carries literal arguments. ``bind`` carries JSONata expressions evaluated
     against ``{"steps": {<id>: <result>}}`` once every dependency has completed, and is
     merged over ``args`` so a binding always wins over a literal of the same name.
+
+    ``when`` is an optional JSONata expression over the same environment. It must evaluate
+    to ``true`` or ``false``: false marks the step, and everything downstream of it,
+    ``not_taken`` instead of running it. Steps it reads become dependencies, as with ``bind``.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -68,6 +75,7 @@ class PlanStep(BaseModel):
     args: dict[str, JsonValue] = Field(default_factory=dict)
     bind: dict[str, str] = Field(default_factory=dict)
     after: tuple[str, ...] = ()
+    when: str | None = None
 
 
 class WorkflowPlan(BaseModel):

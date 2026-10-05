@@ -47,12 +47,15 @@ def dependencies_of(step: PlanStep) -> frozenset[str]:
         step: The step to inspect.
 
     Returns:
-        Explicit ``after`` ids unioned with ids inferred from its binding expressions.
-        Self-references are dropped so a typo becomes a dangling reference rather than
-        a one-node cycle.
+        Explicit ``after`` ids unioned with ids inferred from its binding expressions and
+        its ``when`` condition. Self-references are dropped so a typo becomes a dangling
+        reference rather than a one-node cycle.
     """
     found = set(step.after)
-    for expression in step.bind.values():
+    expressions = [*step.bind.values()]
+    if step.when is not None:
+        expressions.append(step.when)
+    for expression in expressions:
         found.update(_STEP_REF.findall(expression))
     found.discard(step.id)
     return frozenset(found)

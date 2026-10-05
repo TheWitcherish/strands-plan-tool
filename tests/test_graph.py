@@ -47,6 +47,11 @@ def test_self_reference_is_dropped_not_treated_as_a_cycle() -> None:
     assert dependencies_of(s) == frozenset()
 
 
+def test_a_when_condition_creates_an_implicit_edge() -> None:
+    s = PlanStep(id="b", tool="t", when="steps.a.urgent")
+    assert dependencies_of(s) == frozenset({"a"})
+
+
 def test_chain_lays_out_one_step_per_level() -> None:
     plan = WorkflowPlan(
         steps=(
