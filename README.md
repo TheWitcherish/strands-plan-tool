@@ -147,6 +147,34 @@ The values are stable; the names are its own.
 
 Break-even is depth 2.
 
+## Judgement inside a plan
+
+That last row has a way around it. When the judgement is a narrow, rote one (pick a desk,
+yes or no, a score on a rubric), wrap it in a tool backed by a small decision model such as
+[strands-decider](https://github.com/strands-labs/strands-decider). It is a normal tool, so
+the plan does not know a model is behind it, and the chain becomes mechanical again:
+
+```json
+{"steps": [
+  {"id": "ticket", "tool": "read_ticket",   "args": {"ticket_id": 7}},
+  {"id": "triage", "tool": "triage_ticket", "bind": {"text": "steps.ticket.text"}},
+  {"id": "route",  "tool": "route_ticket",  "bind": {"ticket_id": "steps.ticket.id",
+                                                     "desk": "steps.triage.desk",
+                                                     "urgent": "steps.triage.urgent"}}
+ ], "returns": ["route"], "final": true}
+```
+
+`triage_ticket` asks strands-decider which desk owns the ticket and whether it is urgent, and
+returns `{"desk": str, "confidence": float, "urgent": bool}`. On Claude Sonnet 4.6 the plan
+took 1 round trip in 2.3 to 3.0 s; the same chain with the LLM making the triage decision took
+3 round trips in 5.4 to 6.0 s (three runs each, decider served locally on Apple silicon at
+146 to 245 ms per warm call). Keep the confidence in the return shape: it is what you branch
+on to hand a borderline ticket to a person.
+
+Every step in a plan runs, so a decision can choose an *argument* value
+(`"steps.triage.confidence > 0.8 ? \"auto\" : \"human\""`) but cannot skip a step. If the next
+step depends on the answer, call it directly.
+
 ## Measured
 
 Bedrock, `global.anthropic.claude-sonnet-4-6` in `eu-central-1`, 2026-09-29. Same model,
