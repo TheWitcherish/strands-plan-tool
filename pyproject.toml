@@ -85,6 +85,7 @@ disallow_any_explicit = false
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+pythonpath = ["."]
 
 # Lets `uv publish --index testpypi` target the sandbox index for a rehearsal upload.
 # `explicit = true` keeps it out of normal dependency resolution.

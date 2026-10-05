@@ -203,6 +203,22 @@ Three JSONata details that bite in conditions:
 A step that binds to *both* sides of a branch is always `not_taken`, because one of its inputs
 never arrives. Join after a branch with a direct call for now.
 
+To see a branch without a decision model, `examples/goblin_hunt.py` sends the mage after the
+goblin: look it up, then search the forest *or* storm the castle, and attack only at the
+castle. Offline, the plan is hand-written; with `--live`, the model writes it.
+
+```bash
+uv run python -m examples.goblin_hunt                      # castle: storm, attack
+GOBLIN_LAIR=forest uv run python -m examples.goblin_hunt   # forest: an owl, no attack
+uv run python -m examples.goblin_hunt --live               # needs AWS credentials
+```
+
+Live on Claude Sonnet 4.6, the model planned both roads in 6 runs out of 6, 1 round trip
+each, and the right one ran every time. That took one sentence in the system prompt: put
+every road in the plan, each with a `when` on the result it has not seen yet. Without it,
+the model looked the goblin up first and planned only the road it already knew: 2 or 3 round
+trips.
+
 ## Measured
 
 Bedrock, `global.anthropic.claude-sonnet-4-6` in `eu-central-1`, 2026-09-29. Same model,
